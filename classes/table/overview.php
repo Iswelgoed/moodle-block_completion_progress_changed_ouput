@@ -71,6 +71,11 @@ class overview extends sql_table implements dynamic, renderable {
     /** @var bool Whether messages can be sent*/
     protected $messagingallowed;
 
+    /** @var bool Whether table is being built for export output. */
+    protected $exportmode = false;
+    /** @var int Number of activity progress columns included in export output. */
+    protected $exportactivitycolumns = 0;
+
     /**
      * Display the table.
      *
@@ -97,8 +102,9 @@ class overview extends sql_table implements dynamic, renderable {
 
         $tablecolumns = [];
         $tableheaders = [];
+        $this->exportmode = $this->is_downloading();
 
-        if ($this->bulkactions && !$this->is_downloading()) {
+        if ($this->bulkactions && !$this->exportmode) {
             $checkbox = new \core\output\checkbox_toggleall('overview-table', true, [
                 'id' => 'select-all-participants',
                 'name' => 'select-all-participants',
@@ -110,25 +116,40 @@ class overview extends sql_table implements dynamic, renderable {
             $tableheaders[] = $OUTPUT->render($checkbox);
         }
 
-        $tablecolumns[] = 'fullname';
-        $tableheaders[] = get_string('fullname');
-
-        foreach (\core_user\fields::get_identity_fields($this->context) as $field) {
-            $tablecolumns[] = $field;
-            $tableheaders[] = \core_user\fields::get_display_name($field);
-        }
-        if (!in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0) {
+        if ($this->exportmode) {
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = get_string('fullname');
+            $tablecolumns[] = 'email';
+            $tableheaders[] = get_string('email');
             $tablecolumns[] = 'timeaccess';
             $tableheaders[] = get_string('lastonline', 'block_completion_progress');
-        }
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = get_string('progress', 'block_completion_progress');
 
-        if (!$this->is_downloading()) {
+            $this->exportactivitycolumns = count($this->progress->get_activities());
+            for ($i = 1; $i <= $this->exportactivitycolumns; $i++) {
+                $tablecolumns[] = 'progressitem_' . $i;
+                $tableheaders[] = 'Progress ' . $i;
+            }
+        } else {
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = get_string('fullname');
+
+            foreach (\core_user\fields::get_identity_fields($this->context) as $field) {
+                $tablecolumns[] = $field;
+                $tableheaders[] = \core_user\fields::get_display_name($field);
+            }
+            if (!in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0) {
+                $tablecolumns[] = 'timeaccess';
+                $tableheaders[] = get_string('lastonline', 'block_completion_progress');
+            }
+
             $tablecolumns[] = 'progressbar';
             $tableheaders[] = get_string('progressbar', 'block_completion_progress');
-        }
 
-        $tablecolumns[] = 'progress';
-        $tableheaders[] = get_string('progress', 'block_completion_progress');
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = get_string('progress', 'block_completion_progress');
+        }
 
         $this->define_columns($tablecolumns);
         $this->define_headers($tableheaders);
@@ -161,6 +182,9 @@ class overview extends sql_table implements dynamic, renderable {
 
         $fields = \core_user\fields::for_userpic()->with_identity($this->context)
             ->get_sql('u', false, '', '', false)->selects;
+        if (!str_contains($fields, 'u.email')) {
+            $fields .= ', u.email';
+        }
 
         $params = ['courseid' => $this->courseid];
 
@@ -366,12 +390,45 @@ class overview extends sql_table implements dynamic, renderable {
         } else {
             $value = get_string('percents', '', $pct);
         }
+        if ($this->exportmode) {
+            return $pct === null ? '' : $value;
+        }
         $age = time() - (int)$row->progressage;
         if ($row->progressage !== null && $age > 0) {
             $title = get_string('progresscachetime', 'block_completion_progress', \format_time($age));
             $value = \html_writer::span($value, '', ['title' => $title]);
         }
         return $value;
+    }
+
+    /**
+     * Format download-only activity status columns.
+     *
+     * @param string $colname
+     * @param stdClass $row
+     * @return string
+     */
+    public function other_cols($colname, $row) {
+        if (!$this->exportmode || !preg_match('/^progressitem_(\d+)$/', $colname, $matches)) {
+            return parent::other_cols($colname, $row);
+        }
+
+        $position = (int)$matches[1] - 1;
+        if ($position < 0 || $position >= $this->exportactivitycolumns) {
+            return '';
+        }
+
+        $activities = array_values($this->progress->get_visible_activities());
+        if (!array_key_exists($position, $activities)) {
+            return '';
+        }
+
+        $activity = $activities[$position];
+        $completions = $this->progress->get_completions();
+        $status = $completions[$activity->id] ?? COMPLETION_INCOMPLETE;
+        $iscomplete = ($status == COMPLETION_COMPLETE || $status == COMPLETION_COMPLETE_PASS);
+
+        return ($iscomplete ? 'Complete' : 'Not complete') . ' (' . $activity->name . ')';
     }
 
     /**
@@ -442,7 +499,14 @@ class overview extends sql_table implements dynamic, renderable {
      * @return bool
      */
     public function needs_percentages_computed(): bool {
-        return !!preg_match('/\bprogress\s/', self::get_sort_for_table($this->uniqueid)) &&
-            !$this->is_resetting_preferences();
+        if ($this->is_resetting_preferences()) {
+            return false;
+        }
+
+        try {
+            return !!preg_match('/\bprogress\s/', self::get_sort_for_table($this->uniqueid));
+        } catch (\coding_exception $e) {
+            return false;
+        }
     }
 }
