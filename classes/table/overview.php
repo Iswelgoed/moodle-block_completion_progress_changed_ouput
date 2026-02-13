@@ -168,12 +168,17 @@ class overview extends sql_table implements dynamic, renderable {
         $this->define_headers($tableheaders);
         $this->define_header_column('fullname');
         $this->sortable(true, 'firstname');
-        $this->no_sorting('select');
-        $this->no_sorting('progressbar');
-        for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMNS; $i++) {
-            $this->no_sorting('progressitem' . $i);
+        if ($this->bulkactions && !$this->is_downloading()) {
+            $this->no_sorting('select');
         }
-        $this->no_sorting('progressoverflow');
+        if (!$this->is_downloading()) {
+            $this->no_sorting('progressbar');
+        } else {
+            for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMNS; $i++) {
+                $this->no_sorting('progressitem' . $i);
+            }
+            $this->no_sorting('progressoverflow');
+        }
         $this->set_default_per_page(20);
         $this->is_downloadable(true);
         $this->show_download_buttons_at([TABLE_P_BOTTOM]);
