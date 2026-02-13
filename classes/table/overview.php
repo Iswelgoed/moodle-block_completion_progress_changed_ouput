@@ -57,6 +57,9 @@ class overview extends sql_table implements dynamic, renderable {
     /** @var completion_progress Progress bar instance. */
     protected $progress;
 
+    /** @var array Activity columns included for download export. */
+    protected $downloadactivities = [];
+
     /** @var string Common date formatting pattern string. */
     protected $strftimedaydatetime;
     /** @var string Indeterminate percentage string. */
@@ -98,7 +101,42 @@ class overview extends sql_table implements dynamic, renderable {
         $tablecolumns = [];
         $tableheaders = [];
 
-        if ($this->bulkactions && !$this->is_downloading()) {
+        if ($this->is_downloading()) {
+            $this->setup_download_columns($tablecolumns, $tableheaders);
+        } else {
+            $this->setup_standard_columns($tablecolumns, $tableheaders);
+        }
+
+        $this->define_columns($tablecolumns);
+        $this->define_headers($tableheaders);
+        $this->define_header_column('fullname');
+        $this->sortable(true, 'firstname');
+        $this->no_sorting('select');
+        $this->no_sorting('progressbar');
+        $this->set_default_per_page(20);
+        $this->is_downloadable(true);
+        $this->show_download_buttons_at([TABLE_P_BOTTOM]);
+        $this->set_attribute('id', 'overview');
+        $this->column_class('select', 'col-select');
+        $this->column_class('fullname', 'col-fullname');
+        $this->column_class('timeaccess', 'col-timeaccess');
+        $this->column_class('progressbar', 'col-progressbar');
+        $this->column_class('progress', 'col-progress');
+
+        parent::out($pagesize, $useinitialsbar, $downloadhelpbutton);
+    }
+
+    /**
+     * Build standard (on-screen) table columns.
+     *
+     * @param array $tablecolumns
+     * @param array $tableheaders
+     * @return void
+     */
+    protected function setup_standard_columns(array &$tablecolumns, array &$tableheaders): void {
+        global $CFG, $OUTPUT;
+
+        if ($this->bulkactions) {
             $checkbox = new \core\output\checkbox_toggleall('overview-table', true, [
                 'id' => 'select-all-participants',
                 'name' => 'select-all-participants',
@@ -122,31 +160,53 @@ class overview extends sql_table implements dynamic, renderable {
             $tableheaders[] = get_string('lastonline', 'block_completion_progress');
         }
 
-        if (!$this->is_downloading()) {
-            $tablecolumns[] = 'progressbar';
-            $tableheaders[] = get_string('progressbar', 'block_completion_progress');
-        }
+        $tablecolumns[] = 'progressbar';
+        $tableheaders[] = get_string('progressbar', 'block_completion_progress');
 
         $tablecolumns[] = 'progress';
         $tableheaders[] = get_string('progress', 'block_completion_progress');
 
-        $this->define_columns($tablecolumns);
-        $this->define_headers($tableheaders);
-        $this->define_header_column('fullname');
-        $this->sortable(true, 'firstname');
-        $this->no_sorting('select');
-        $this->no_sorting('progressbar');
-        $this->set_default_per_page(20);
-        $this->is_downloadable(true);
-        $this->show_download_buttons_at([TABLE_P_BOTTOM]);
-        $this->set_attribute('id', 'overview');
-        $this->column_class('select', 'col-select');
-        $this->column_class('fullname', 'col-fullname');
-        $this->column_class('timeaccess', 'col-timeaccess');
-        $this->column_class('progressbar', 'col-progressbar');
-        $this->column_class('progress', 'col-progress');
+    }
 
-        parent::out($pagesize, $useinitialsbar, $downloadhelpbutton);
+    /**
+     * Build download-only table columns.
+     *
+     * @param array $tablecolumns
+     * @param array $tableheaders
+     * @return void
+     */
+    protected function setup_download_columns(array &$tablecolumns, array &$tableheaders): void {
+        $tablecolumns[] = 'fullname';
+        $tableheaders[] = get_string('fullname');
+
+        $tablecolumns[] = 'email';
+        $tableheaders[] = get_string('email');
+
+        $tablecolumns[] = 'timeaccess';
+        $tableheaders[] = get_string('lastonline', 'block_completion_progress');
+
+        $tablecolumns[] = 'progress';
+        $tableheaders[] = get_string('progress', 'block_completion_progress');
+
+        $this->downloadactivities = $this->get_download_activities();
+
+        foreach ($this->downloadactivities as $activity) {
+            $tablecolumns[] = 'completion_' . $activity->id;
+            $tableheaders[] = get_string('completion', 'completion') . ': ' . $activity->name;
+
+            $tablecolumns[] = 'barcontainer_' . $activity->id;
+            $tableheaders[] = get_string('progressbar', 'block_completion_progress') . ': ' . $activity->name;
+        }
+    }
+
+    /**
+     * Retrieve activities that should be represented in the download export.
+     *
+     * @return array
+     */
+    protected function get_download_activities(): array {
+        $progress = (new completion_progress($this->course))->for_overview()->for_block_instance($this->blockinstance);
+        return $progress->get_activities();
     }
 
     /**
@@ -372,6 +432,50 @@ class overview extends sql_table implements dynamic, renderable {
             $value = \html_writer::span($value, '', ['title' => $title]);
         }
         return $value;
+    }
+
+    /**
+     * Dynamic column output for export-only completion and barcontainer columns.
+     *
+     * @param string $column
+     * @param object $row
+     * @return string
+     */
+    public function other_cols($column, $row) {
+        if (strpos($column, 'completion_') !== 0 && strpos($column, 'barcontainer_') !== 0) {
+            return parent::other_cols($column, $row);
+        }
+
+        $cmid = (int)substr($column, strrpos($column, '_') + 1);
+        if (!$this->progress) {
+            $this->progress = (new completion_progress($this->course))->for_overview()->for_block_instance($this->blockinstance);
+        }
+        $this->progress->for_user($row);
+
+        $completions = $this->progress->get_completions();
+        $activities = [];
+        foreach ($this->progress->get_visible_activities() as $activity) {
+            $activities[$activity->id] = $activity;
+        }
+
+        if (!isset($activities[$cmid])) {
+            return '';
+        }
+
+        $activity = $activities[$cmid];
+        $state = $completions[$cmid] ?? COMPLETION_INCOMPLETE;
+
+        if (strpos($column, 'completion_') === 0) {
+            if ($state == COMPLETION_COMPLETE || $state == COMPLETION_COMPLETE_PASS) {
+                return 'Complete (' . $activity->name . ')';
+            }
+            return 'Not complete (' . $activity->name . ')';
+        }
+
+        if ($state == COMPLETION_COMPLETE_PASS) {
+            return 'Passed (' . $activity->name . ')';
+        }
+        return 'Not passed (' . $activity->name . ')';
     }
 
     /**
