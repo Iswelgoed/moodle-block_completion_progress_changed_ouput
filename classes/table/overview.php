@@ -546,6 +546,10 @@ class overview extends sql_table implements dynamic, renderable {
      * @return bool
      */
     public function needs_percentages_computed(): bool {
+        if (empty($this->setup)) {
+            return false;
+        }
+
         return !!preg_match('/\bprogress\s/', self::get_sort_for_table($this->uniqueid)) &&
             !$this->is_resetting_preferences();
     }
