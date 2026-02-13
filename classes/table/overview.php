@@ -551,7 +551,17 @@ class overview extends sql_table implements dynamic, renderable {
      * @return bool
      */
     public function needs_percentages_computed(): bool {
-        return !!preg_match('/\bprogress\s/', self::get_sort_for_table($this->uniqueid)) &&
-            !$this->is_resetting_preferences();
+        if ($this->is_resetting_preferences()) {
+            return false;
+        }
+
+        // Use request sort parameters directly so this check does not depend on table setup
+        // state in core table internals.
+        $sort = optional_param('sort', '', PARAM_RAW);
+        if ($sort === '') {
+            return false;
+        }
+
+        return (bool)preg_match('/\bprogress\b/i', $sort);
     }
 }
