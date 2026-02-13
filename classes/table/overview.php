@@ -41,6 +41,9 @@ require_once($CFG->libdir . '/tablelib.php');
  * Overview table.
  */
 class overview extends sql_table implements dynamic, renderable {
+    /** @var int Number of progress columns to include before overflow in exports. */
+    const EXPORT_PROGRESS_COLUMN_COUNT = 30;
+
     /** @var int Course id. */
     protected $courseid;
     /** @var stdClass Course object. */
@@ -56,6 +59,9 @@ class overview extends sql_table implements dynamic, renderable {
 
     /** @var completion_progress Progress bar instance. */
     protected $progress;
+
+    /** @var array Cached export progress cells keyed by user id. */
+    protected $exportprogresscells = [];
 
     /** @var string Common date formatting pattern string. */
     protected $strftimedaydatetime;
@@ -98,37 +104,64 @@ class overview extends sql_table implements dynamic, renderable {
         $tablecolumns = [];
         $tableheaders = [];
 
-        if ($this->bulkactions && !$this->is_downloading()) {
-            $checkbox = new \core\output\checkbox_toggleall('overview-table', true, [
-                'id' => 'select-all-participants',
-                'name' => 'select-all-participants',
-                'label' => get_string('selectall'),
-                'labelclasses' => 'sr-only',
-                'checked' => false,
-            ]);
-            $tablecolumns[] = 'select';
-            $tableheaders[] = $OUTPUT->render($checkbox);
-        }
+        $identityfields = \core_user\fields::get_identity_fields($this->context);
+        $hasemailfield = in_array('email', $identityfields, true);
+        $showlastonline = !in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0;
 
-        $tablecolumns[] = 'fullname';
-        $tableheaders[] = get_string('fullname');
+        if ($this->is_downloading()) {
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = get_string('fullname');
 
-        foreach (\core_user\fields::get_identity_fields($this->context) as $field) {
-            $tablecolumns[] = $field;
-            $tableheaders[] = \core_user\fields::get_display_name($field);
-        }
-        if (!in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0) {
-            $tablecolumns[] = 'timeaccess';
-            $tableheaders[] = get_string('lastonline', 'block_completion_progress');
-        }
+            if ($hasemailfield) {
+                $tablecolumns[] = 'email';
+                $tableheaders[] = \core_user\fields::get_display_name('email');
+            }
 
-        if (!$this->is_downloading()) {
+            if ($showlastonline) {
+                $tablecolumns[] = 'timeaccess';
+                $tableheaders[] = get_string('lastonline', 'block_completion_progress');
+            }
+
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = get_string('progress', 'block_completion_progress') . ' %';
+
+            for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMN_COUNT; $i++) {
+                $tablecolumns[] = 'progressitem' . $i;
+                $tableheaders[] = 'Progress ' . $i;
+            }
+            $tablecolumns[] = 'progressoverflow';
+            $tableheaders[] = 'Progress more';
+        } else {
+            if ($this->bulkactions) {
+                $checkbox = new \core\output\checkbox_toggleall('overview-table', true, [
+                    'id' => 'select-all-participants',
+                    'name' => 'select-all-participants',
+                    'label' => get_string('selectall'),
+                    'labelclasses' => 'sr-only',
+                    'checked' => false,
+                ]);
+                $tablecolumns[] = 'select';
+                $tableheaders[] = $OUTPUT->render($checkbox);
+            }
+
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = get_string('fullname');
+
+            foreach ($identityfields as $field) {
+                $tablecolumns[] = $field;
+                $tableheaders[] = \core_user\fields::get_display_name($field);
+            }
+            if ($showlastonline) {
+                $tablecolumns[] = 'timeaccess';
+                $tableheaders[] = get_string('lastonline', 'block_completion_progress');
+            }
+
             $tablecolumns[] = 'progressbar';
             $tableheaders[] = get_string('progressbar', 'block_completion_progress');
-        }
 
-        $tablecolumns[] = 'progress';
-        $tableheaders[] = get_string('progress', 'block_completion_progress');
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = get_string('progress', 'block_completion_progress');
+        }
 
         $this->define_columns($tablecolumns);
         $this->define_headers($tableheaders);
@@ -306,6 +339,7 @@ class overview extends sql_table implements dynamic, renderable {
         if (!$this->progress) {
             $this->progress = (new completion_progress($this->course))->for_overview()->for_block_instance($this->blockinstance);
         }
+
         $this->progress->for_user($row);
         return parent::format_row($row);
     }
@@ -339,7 +373,10 @@ class overview extends sql_table implements dynamic, renderable {
      */
     public function col_timeaccess($row) {
         if ($row->timeaccess == 0) {
-            return $this->strnever;
+            return $this->is_downloading() ? '' : $this->strnever;
+        }
+        if ($this->is_downloading()) {
+            return userdate($row->timeaccess, '%Y-%m-%d');
         }
         return userdate($row->timeaccess, $this->strftimedaydatetime);
     }
@@ -366,12 +403,73 @@ class overview extends sql_table implements dynamic, renderable {
         } else {
             $value = get_string('percents', '', $pct);
         }
+        if ($this->is_downloading()) {
+            return $value;
+        }
         $age = time() - (int)$row->progressage;
         if ($row->progressage !== null && $age > 0) {
             $title = get_string('progresscachetime', 'block_completion_progress', \format_time($age));
             $value = \html_writer::span($value, '', ['title' => $title]);
         }
         return $value;
+    }
+
+    /**
+     * Produce extra export-only completion columns.
+     *
+     * @param string $colname
+     * @param object $row
+     * @return string|null
+     */
+    public function other_cols($colname, $row) {
+        if (!$this->is_downloading()) {
+            return null;
+        }
+
+        if (!preg_match('/^progressitem\d+$/', $colname) && $colname !== 'progressoverflow') {
+            return null;
+        }
+
+        $cells = $this->get_export_progress_cells($row);
+        return $cells[$colname] ?? '';
+    }
+
+    /**
+     * Build export cells for activity-level progress.
+     *
+     * @param object $row
+     * @return array
+     */
+    protected function get_export_progress_cells($row): array {
+        if (isset($this->exportprogresscells[$row->id])) {
+            return $this->exportprogresscells[$row->id];
+        }
+
+        if (!$this->progress) {
+            $this->progress = (new completion_progress($this->course))->for_overview()->for_block_instance($this->blockinstance);
+        }
+
+        $this->progress->for_user($row);
+        $activities = $this->progress->get_visible_activities();
+        $completions = $this->progress->get_completions();
+
+        $texts = [];
+        foreach ($activities as $activity) {
+            $state = $completions[$activity->id] ?? COMPLETION_INCOMPLETE;
+            $iscomplete = $state == COMPLETION_COMPLETE || $state == COMPLETION_COMPLETE_PASS;
+            $texts[] = ($iscomplete ? 'Complete' : 'Not complete') . ' (' . $activity->name . ')';
+        }
+
+        $cells = [];
+        for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMN_COUNT; $i++) {
+            $cells['progressitem' . $i] = $texts[$i - 1] ?? '';
+        }
+
+        $overflowitems = array_slice($texts, self::EXPORT_PROGRESS_COLUMN_COUNT);
+        $cells['progressoverflow'] = implode(' | ', $overflowitems);
+
+        $this->exportprogresscells[$row->id] = $cells;
+        return $cells;
     }
 
     /**
