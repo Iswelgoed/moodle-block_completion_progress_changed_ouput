@@ -104,7 +104,7 @@ class overview extends sql_table implements dynamic, renderable {
         if ($this->is_downloading()) {
             $this->setup_download_columns($tablecolumns, $tableheaders);
         } else {
-            $this->setup_standard_columns($tablecolumns, $tableheaders);
+            $this->setup_standard_columns($tablecolumns, $tableheaders, $hiddenfields);
         }
 
         $this->define_columns($tablecolumns);
@@ -133,7 +133,7 @@ class overview extends sql_table implements dynamic, renderable {
      * @param array $tableheaders
      * @return void
      */
-    protected function setup_standard_columns(array &$tablecolumns, array &$tableheaders): void {
+    protected function setup_standard_columns(array &$tablecolumns, array &$tableheaders, array $hiddenfields): void {
         global $CFG, $OUTPUT;
 
         if ($this->bulkactions) {
@@ -443,7 +443,7 @@ class overview extends sql_table implements dynamic, renderable {
      */
     public function other_cols($column, $row) {
         if (strpos($column, 'completion_') !== 0 && strpos($column, 'barcontainer_') !== 0) {
-            return parent::other_cols($column, $row);
+            return $row->{$column} ?? '';
         }
 
         $cmid = (int)substr($column, strrpos($column, '_') + 1);
