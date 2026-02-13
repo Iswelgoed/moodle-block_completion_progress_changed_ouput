@@ -438,21 +438,17 @@ class overview extends sql_table implements dynamic, renderable {
      * @return string
      */
     public function other_cols($columnname, $row): string {
-        if (!$this->is_downloading()) {
-            return '';
-        }
-
-        if (preg_match('/^progressitem([1-9]\d*)$/', $columnname, $matches)) {
+        if ($this->is_downloading() && preg_match('/^progressitem([1-9]\d*)$/', $columnname, $matches)) {
             $index = (int)$matches[1] - 1;
             $cells = $this->exportprogresscache[$row->id]['cells'] ?? [];
             return $cells[$index] ?? '';
         }
 
-        if ($columnname === 'progressoverflow') {
+        if ($this->is_downloading() && $columnname === 'progressoverflow') {
             return $this->exportprogresscache[$row->id]['overflow'] ?? '';
         }
 
-        return '';
+        return parent::other_cols($columnname, $row);
     }
 
     /**
