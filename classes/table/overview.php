@@ -41,6 +41,9 @@ require_once($CFG->libdir . '/tablelib.php');
  * Overview table.
  */
 class overview extends sql_table implements dynamic, renderable {
+    /** @var int Number of explicit progress columns in downloaded reports. */
+    protected const EXPORT_PROGRESS_COLUMNS = 30;
+
     /** @var int Course id. */
     protected $courseid;
     /** @var stdClass Course object. */
@@ -70,6 +73,12 @@ class overview extends sql_table implements dynamic, renderable {
     protected $notesallowed;
     /** @var bool Whether messages can be sent*/
     protected $messagingallowed;
+
+    /** @var bool Whether download output should include an email column. */
+    protected $includeemail = false;
+
+    /** @var array<int, array<string, mixed>> Per-user cache of download progress column values. */
+    protected $exportprogresscache = [];
 
     /**
      * Display the table.
@@ -110,25 +119,50 @@ class overview extends sql_table implements dynamic, renderable {
             $tableheaders[] = $OUTPUT->render($checkbox);
         }
 
-        $tablecolumns[] = 'fullname';
-        $tableheaders[] = get_string('fullname');
+        if ($this->is_downloading()) {
+            $identityfields = \core_user\fields::get_identity_fields($this->context);
+            $this->includeemail = in_array('email', $identityfields, true);
 
-        foreach (\core_user\fields::get_identity_fields($this->context) as $field) {
-            $tablecolumns[] = $field;
-            $tableheaders[] = \core_user\fields::get_display_name($field);
-        }
-        if (!in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0) {
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = 'Name';
+
+            if ($this->includeemail) {
+                $tablecolumns[] = 'email';
+                $tableheaders[] = 'Email';
+            }
+
             $tablecolumns[] = 'timeaccess';
-            $tableheaders[] = get_string('lastonline', 'block_completion_progress');
-        }
+            $tableheaders[] = 'Last date';
 
-        if (!$this->is_downloading()) {
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = 'Progress %';
+
+            for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMNS; $i++) {
+                $tablecolumns[] = 'progressitem' . $i;
+                $tableheaders[] = 'Progress ' . $i;
+            }
+
+            $tablecolumns[] = 'progressoverflow';
+            $tableheaders[] = 'Progress ' . (self::EXPORT_PROGRESS_COLUMNS + 1);
+        } else {
+            $tablecolumns[] = 'fullname';
+            $tableheaders[] = get_string('fullname');
+
+            foreach (\core_user\fields::get_identity_fields($this->context) as $field) {
+                $tablecolumns[] = $field;
+                $tableheaders[] = \core_user\fields::get_display_name($field);
+            }
+            if (!in_array('lastaccess', $hiddenfields) && get_config('block_completion_progress', 'showlastincourse') != 0) {
+                $tablecolumns[] = 'timeaccess';
+                $tableheaders[] = get_string('lastonline', 'block_completion_progress');
+            }
+
             $tablecolumns[] = 'progressbar';
             $tableheaders[] = get_string('progressbar', 'block_completion_progress');
-        }
 
-        $tablecolumns[] = 'progress';
-        $tableheaders[] = get_string('progress', 'block_completion_progress');
+            $tablecolumns[] = 'progress';
+            $tableheaders[] = get_string('progress', 'block_completion_progress');
+        }
 
         $this->define_columns($tablecolumns);
         $this->define_headers($tableheaders);
@@ -136,6 +170,10 @@ class overview extends sql_table implements dynamic, renderable {
         $this->sortable(true, 'firstname');
         $this->no_sorting('select');
         $this->no_sorting('progressbar');
+        for ($i = 1; $i <= self::EXPORT_PROGRESS_COLUMNS; $i++) {
+            $this->no_sorting('progressitem' . $i);
+        }
+        $this->no_sorting('progressoverflow');
         $this->set_default_per_page(20);
         $this->is_downloadable(true);
         $this->show_download_buttons_at([TABLE_P_BOTTOM]);
@@ -307,6 +345,11 @@ class overview extends sql_table implements dynamic, renderable {
             $this->progress = (new completion_progress($this->course))->for_overview()->for_block_instance($this->blockinstance);
         }
         $this->progress->for_user($row);
+
+        if ($this->is_downloading()) {
+            $this->cache_download_progress_values($row);
+        }
+
         return parent::format_row($row);
     }
 
@@ -338,6 +381,10 @@ class overview extends sql_table implements dynamic, renderable {
      * @return string HTML
      */
     public function col_timeaccess($row) {
+        if ($this->is_downloading()) {
+            return $row->timeaccess > 0 ? userdate($row->timeaccess, '%Y-%m-%d') : '';
+        }
+
         if ($row->timeaccess == 0) {
             return $this->strnever;
         }
@@ -361,6 +408,10 @@ class overview extends sql_table implements dynamic, renderable {
      */
     public function col_progress($row) {
         $pct = $row->progress ?? $this->progress->get_percentage();
+        if ($this->is_downloading()) {
+            return $pct === null ? '' : $pct . '%';
+        }
+
         if ($pct === null) {
             $value = $this->strindeterminate;
         } else {
@@ -372,6 +423,59 @@ class overview extends sql_table implements dynamic, renderable {
             $value = \html_writer::span($value, '', ['title' => $title]);
         }
         return $value;
+    }
+
+    /**
+     * Format custom download columns.
+     *
+     * @param string $columnname
+     * @param object $row
+     * @return string
+     */
+    public function other_cols($columnname, $row): string {
+        if (!$this->is_downloading()) {
+            return '';
+        }
+
+        if (preg_match('/^progressitem([1-9]\d*)$/', $columnname, $matches)) {
+            $index = (int)$matches[1] - 1;
+            $cells = $this->exportprogresscache[$row->id]['cells'] ?? [];
+            return $cells[$index] ?? '';
+        }
+
+        if ($columnname === 'progressoverflow') {
+            return $this->exportprogresscache[$row->id]['overflow'] ?? '';
+        }
+
+        return '';
+    }
+
+    /**
+     * Cache formatted downloadable progress values for the current row.
+     *
+     * @param object $row
+     * @return void
+     */
+    protected function cache_download_progress_values($row): void {
+        $progresscells = [];
+        foreach ($this->progress->get_visible_activities() as $activity) {
+            $completion = $this->progress->get_completions()[$activity->id] ?? COMPLETION_INCOMPLETE;
+            $iscomplete = $completion == COMPLETION_COMPLETE || $completion == COMPLETION_COMPLETE_PASS;
+            $status = $iscomplete ? 'Complete' : 'Not complete';
+            $progresscells[] = $status . ' (' . strip_tags($activity->name) . ')';
+        }
+
+        $cells = array_slice($progresscells, 0, self::EXPORT_PROGRESS_COLUMNS);
+        $cells = array_pad($cells, self::EXPORT_PROGRESS_COLUMNS, '');
+        $overflow = '';
+        if (count($progresscells) > self::EXPORT_PROGRESS_COLUMNS) {
+            $overflow = implode(' | ', array_slice($progresscells, self::EXPORT_PROGRESS_COLUMNS));
+        }
+
+        $this->exportprogresscache[$row->id] = [
+            'cells' => $cells,
+            'overflow' => $overflow,
+        ];
     }
 
     /**
